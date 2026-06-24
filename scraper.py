@@ -67,9 +67,48 @@ def scrape_apartmentsdotcom(search_url):
                 price = property.find_element(By.CSS_SELECTOR, ".property-pricing").text
                 link = property.find_element(By.CSS_SELECTOR, "a.property-link").get_attribute("href")
 
+                # set default if not exist
+                laundry = "Not Specified"
+                pets = "Not Specified"
+                parking = "Not Specified"
+
+                try:
+                    amenities = property.find_element(By.CSS_SELECTOR, ".property-amenities, .placard-amenities").text.lower()
+
+                    if "washer" in amenities or "laundry" in amenities or "dryer" in amenities:
+                        laundry = "In-Unit / Hookups / On-Site / In-Building"
+                    if "dog" in amenities or "cat" in amenities or "pet" in amenities:
+                        pets = "Allowed"
+                    if "park" in amenities or "garage" in amenities:
+                        parking = "Available"
+                except:
+                    # no listed amenities
+                    pass
+
+                lister_name = "Independent Landlord / Not Listed"
+
+                try:
+                    lister_text = property.find_element(By.CSS_SELECTOR, ".branding-title, .property-managed-by, .logo-container")
+
+                    # if there is an image try to extract company name / headshot name?
+                    if lister_text.tag_name == "img":
+                        lister_name = lister_text.get_attribute("alt") or lister_text.get_attribute("title")
+                    else:
+                        lister_name = lister_text.text.strip()
+
+                    # look for nested attrs if text is empty
+                    if not lister_name:
+                        lister_name = lister_text.get_attribute("textContent").strip()
+
+                except:
+                    pass
+
                 print(f"[{index + 1}] {title}")
-                print(f"    Price: {price}")
-                print(f"    URL: {link}\n")
+                print(f"    Price:   {price}")
+                print(f"    Laundry: {laundry}")
+                print(f"    Pets:    {pets}")
+                print(f"    Parking: {parking}")
+                print(f"    URL:     {link}\n")
 
             except:
                 continue
