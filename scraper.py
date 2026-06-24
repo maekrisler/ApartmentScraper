@@ -1,6 +1,10 @@
+import random
+import pandas as pd
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 import time
+import requests
+import sys
 
 class ApartmentScraper:
     BASE_URL = "https://www.apartments.com"
@@ -43,6 +47,7 @@ def scrape_apartmentsdotcom(search_url):
     # make that baby undetected
     driver = Driver(uc=True, headless2=True)
 
+    all_links = []
     try:
         print("Starting the scrape ...")
         driver.get(search_url)
@@ -54,70 +59,101 @@ def scrape_apartmentsdotcom(search_url):
             time.sleep(1)
 
         # might need to change based on site
-        listings = driver.find_elements(By.CSS_SELECTOR, "article.placard")
+        listings = driver.find_elements(By.CSS_SELECTOR, "a.property-link")
 
-        print(f"Current page title: {driver.get_title()}")
-        driver.save_screenshot("debug_view.png")
+        for link in listings:
+            url = link.get_attribute("href")
+            # dedupe
+            if url and url not in all_links:
+                all_links.append(url)
 
-        print(f"Found {len(listings)} listings on this page.\n")
+        print(f"Successfully collected {len(all_links)} unique listing URLs.")
+        return all_links
 
-        for index, property in enumerate(listings):
-            try:
-                title = property.find_element(By.CSS_SELECTOR, ".property-address").text
-                price = property.find_element(By.CSS_SELECTOR, ".property-pricing").text
-                link = property.find_element(By.CSS_SELECTOR, "a.property-link").get_attribute("href")
-
-                # set default if not exist
-                laundry = "Not Specified"
-                pets = "Not Specified"
-                parking = "Not Specified"
-
-                try:
-                    amenities = property.find_element(By.CSS_SELECTOR, ".property-amenities, .placard-amenities").text.lower()
-
-                    if "washer" in amenities or "laundry" in amenities or "dryer" in amenities:
-                        laundry = "In-Unit / Hookups / On-Site / In-Building"
-                    if "dog" in amenities or "cat" in amenities or "pet" in amenities:
-                        pets = "Allowed"
-                    if "park" in amenities or "garage" in amenities:
-                        parking = "Available"
-                except:
-                    # no listed amenities
-                    pass
-
-                lister_name = "Independent Landlord / Not Listed"
-
-                try:
-                    lister_text = property.find_element(By.CSS_SELECTOR, ".branding-title, .property-managed-by, .logo-container")
-
-                    # if there is an image try to extract company name / headshot name?
-                    if lister_text.tag_name == "img":
-                        lister_name = lister_text.get_attribute("alt") or lister_text.get_attribute("title")
-                    else:
-                        lister_name = lister_text.text.strip()
-
-                    # look for nested attrs if text is empty
-                    if not lister_name:
-                        lister_name = lister_text.get_attribute("textContent").strip()
-
-                except:
-                    pass
-
-                print(f"[{index + 1}] {title}")
-                print(f"    Price:   {price}")
-                print(f"    Laundry: {laundry}")
-                print(f"    Pets:    {pets}")
-                print(f"    Parking: {parking}")
-                print(f"    URL:     {link}\n")
-
-            except:
-                continue
     finally:
         driver.quit()
 
 
+def scrape_indiv_listing(url_list):
+    driver = Driver(uc=True, headless2=True)
+
+    listings = []
+
+    try:
+        for idx, url in enumerate(url_list):
+            try:
+                print(f"[{idx + 1}/{len(url_list)}] Opening: {url}")
+                driver.get(url)
+                time.sleep(3)
+
+                title = driver.find_element(By.CSS_SELECTOR, "h1.propertyName").text.strip()
+
+                try:
+                    price = driver.find_element(By.CSS_SELECTOR, ".rentInfoLabel, .priceRange").text.strip()
+                except:
+                    price = "Contact Property"
+
+                try:
+                    amenities_block = driver.find_element(By.ID, "amenitiesSection").text.lower()
+                except:
+                    amenities_block = ""
+
+                record = {
+                    "Address": title,
+                    "Price": price,
+                    "Raw_Amenities": amenities_block,
+                    "URL": url
+                }
+
+                listings.append(record)
+
+                # don't get caught as a bot hehe
+                time.sleep(random.uniform(1.5, 3.5))
+
+            except Exception as e:
+                print(f"Skipping broken detail page {url}: {e}")
+                continue
+    finally:
+        driver.quit()
+
+    return pd.DataFrame(listings)
+
+
+def get_transit(api_key):
+    url = "https://api-v3.mbta.com/stops"
+
+    params = {
+        "filter[route]": "Red,Green,Silver"
+    }
+
+    headers = {
+        "X-API-Key": api_key
+    }
+
+    response = requests.get(url, params=params, headers=headers)
+
+    if response.status_code == 200:
+        json_data = response.json()
+
+        stops_list = []
+        for stop in json_data.get('data', []):
+            attributes = stop.get('attributes', {})
+            stops_list.append({
+                'Stop Name': attributes.get('name'),
+                'Address': attributes.get('address')
+            })
+
+        stops_df = pd.DataFrame(stops_list).dropna(subset=['Address']).drop_duplicates().reset_index(drop=True)
+
+        print(stops_df.head())
+        return stops_df
+    else:
+        print(f"Failed to fetch data: {response.status_code}")
+
+
+
 if __name__ == "__main__":
-    target_city = "Boston, MA"
+    target_city = "cambridge-ma"
     max_budget = 3000
     required_beds = 2
 
@@ -129,4 +165,13 @@ if __name__ == "__main__":
     generated_url = query.build_url()
 
     # Run the robust scraper
-    scrape_apartmentsdotcom(generated_url)
+    # links = scrape_apartmentsdotcom(generated_url)
+    #
+    # if links:
+    #     final_df = scrape_indiv_listing(links)
+    #     print(final_df.head())
+
+    if len(sys.argv) < 3:
+        print("Usage: python scraper.py <api_key>")
+        api_key = sys.argv[1]
+        stops_df = get_transit(api_key)
