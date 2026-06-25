@@ -14,8 +14,11 @@ from geopy.geocoders import Nominatim
 from scipy.spatial import KDTree
 from geopy.extra.rate_limiter import RateLimiter
 import re
+import os
+from dotenv import load_dotenv
 
 pd.set_option('display.max_columns', None)
+load_dotenv()
 
 
 class ApartmentScraper:
@@ -388,10 +391,6 @@ if __name__ == "__main__":
     required_beds = 2
     move_in = datetime(2026, 8, 1)
 
-    if len(sys.argv) < 2:
-        print("Usage: python scraper.py <api_key>")
-        quit()
-
     # Dynamically build the search query
     query = (ApartmentScraper(location=target_city)
              .with_min_bedrooms(required_beds)
@@ -409,7 +408,10 @@ if __name__ == "__main__":
         apartments_df = scrape_indiv_listing(links_temp)
         # print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
-    api_key = sys.argv[1]
+    api_key = os.getenv("TRANSIT_API_KEY")
+    if not api_key:
+        print("Missing TRANSIT_API_KEY. Add it to your .env file.")
+        quit()
 
     if apartments_df.empty:
         all_info = apartments_df.copy()
