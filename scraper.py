@@ -385,17 +385,12 @@ def rank_matches(full_df):
     return df.sort_values(by='ranking', ascending=False).reset_index(drop=True)
 
 
-if __name__ == "__main__":
-    target_city = "allston-ma"
-    max_budget = 3000
-    required_beds = 2
-    move_in = datetime(2026, 8, 1)
-
+def aggregate_nbr(loc, budget, beds, move_in_date):
     # Dynamically build the search query
-    query = (ApartmentScraper(location=target_city)
-             .with_min_bedrooms(required_beds)
-             .with_max_price(max_budget)
-             .with_move_in(move_in))
+    query = (ApartmentScraper(location=loc)
+             .with_min_bedrooms(beds)
+             .with_max_price(budget)
+             .with_move_in(move_in_date))
 
     generated_url = query.build_url()
 
@@ -425,3 +420,13 @@ if __name__ == "__main__":
         ranked_info = rank_matches(all_info)
 
         print(f"Final Apartment Dataframe:\n{ranked_info}")
+
+
+if __name__ == "__main__":
+    target_cities = ["south-end-boston-ma", "back-bay-boston-ma", "allston-ma", "cambridge-ma", "somerville-ma"]
+    max_budget = 3000
+    required_beds = 2
+    move_in = datetime(2026, 8, 1)
+
+    for location in target_cities:
+        aggregate_nbr(loc=location, budget=max_budget, beds=required_beds, move_in_date=move_in)
