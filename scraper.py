@@ -2,6 +2,9 @@ import random
 import pandas as pd
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import NoSuchElementException, TimeoutException
 import time
 from datetime import datetime
 from dateutil import parser as dateparser
@@ -10,6 +13,7 @@ import sys
 from geopy.geocoders import Nominatim
 from scipy.spatial import KDTree
 from geopy.extra.rate_limiter import RateLimiter
+import re
 
 pd.set_option('display.max_columns', None)
 
@@ -32,16 +36,16 @@ class ApartmentScraper:
         # desired apartment types
         self.allowed_types = ["houses", "condos", "townhomes"]
 
-    def with_min_bedrooms(self, beds:int):
+    def with_min_bedrooms(self, beds: int):
         if beds in self.bed_map:
             self.min_beds = self.bed_map[beds]
         return self
 
-    def with_max_price(self, price:int):
+    def with_max_price(self, price: int):
         self.max_price = f"under-{price}"
         return self
 
-    def with_move_in(self, move_in_date:datetime):
+    def with_move_in(self, move_in_date: datetime):
         self.move_in_date = move_in_date
         return self
 
@@ -97,6 +101,43 @@ def scrape_apartmentsdotcom(search_urls):
         driver.quit()
 
 
+# parse css selectors and return the first non empty
+def first_text(driver, selectors):
+    for sel in selectors:
+        try:
+            txt = driver.find_element(By.CSS_SELECTOR, sel).text.strip()
+            if txt:
+                return txt
+        except NoSuchElementException:
+            continue
+
+    return None
+
+
+# read apartment info grid as {label: value} map so missing / reordered pages don't break script
+def parse_info_grid(driver):
+    grid = {}
+    cells = driver.find_elements(By.CSS_SELECTOR,
+                                 "#priceBedBathAreaInfoWrapper li.column")
+    for cell in cells:
+        try:
+            label = cell.find_element(By.CSS_SELECTOR, ".rentInfoLabel").text.strip()
+            detail = cell.find_element(By.CSS_SELECTOR, ".rentInfoDetail").text.strip()
+
+            if label:
+                grid[label.lower()] = detail
+        except NoSuchElementException:
+            continue
+    return grid
+
+
+def get_address(driver):
+    street = first_text(driver, [".propertyAddressContainer .delivery-address h1"]) or ""
+    locally = first_text(driver, [".propertyAddressContainer h2"]) or ""
+    full = f"{street.strip()}, {locally.strip()}"
+    return " ".join(full.replace(" ,", ",").split()).strip(", ") or "Unknown"
+
+
 def parse_availability(raw_txt, today):
     if not raw_txt:
         return None, False
@@ -110,74 +151,74 @@ def parse_availability(raw_txt, today):
     try:
         dt = dateparser.parse(raw_txt, fuzzy=True,
                               default=datetime(today.year, today.month, 1))
-
-        if dt < today and (today - dt).days > 30:
-            dt = dt.replace(year=dt.year + 1)
-            return dt, False
     except (ValueError, OverflowError):
         return None, False
+
+    if dt is None:
+        return None, False
+    # ensure listings are in the future not the past
+    if dt < today and (today - dt).days > 30:
+        dt = dt.replace(year=dt.year + 1)
+        return dt, False
+
+
+# re-try pages that might be blocked from bot captcha
+def looks_blocked(driver):
+    src = driver.page_source.lower()
+    return any(msg in src for msg in
+               ("captcha", "press & hold", "access denied",
+                "unusual activity", "verify you are"))
+
+
+# extract the apartment info
+def extract_listing(driver, url, today):
+    # headlines could be a building name or price, check for $ to handle differences properly
+    headline = first_text(driver, ["#propertyName", ".propertyName"]) or ""
+    if headline.startswith("$"):
+        price = headline
+    else:
+        price = first_text(driver, [".priceRange"]) or "Contact Property"
+
+    grid = parse_info_grid(driver)
+    avail_raw = grid.get("available") or first_text(driver, [".availabilityInfo"]) or ""
+    avail_dt, is_now = parse_availability(avail_raw, today)
+
+    address = get_address(driver)
+    address = re.sub(r'\bopen\b', 'Boston', address, flags=re.IGNORECASE)
+
+    return {
+        "Address": address,
+        "Price": price,
+        "Bedrooms": grid.get("bedrooms"),
+        "Bathrooms": grid.get("bathrooms"),
+        "SqFt": grid.get("square feet"),
+        "Available_Raw": avail_raw,
+        "Available_Date": avail_dt,
+        "Available_Now": is_now,
+        "URL": url,
+    }
 
 
 def scrape_indiv_listing(url_list):
     driver = Driver(uc=True, headless2=True)
-
-    listings = []
+    today = datetime.now()
+    listings, blocked = [], []
 
     try:
         for idx, url in enumerate(url_list):
             try:
                 print(f"[{idx + 1}/{len(url_list)}] Opening: {url}")
                 driver.get(url)
-                time.sleep(3)
 
-                # grab listing title
-                title = driver.find_element(By.CSS_SELECTOR, "h1.propertyName").text.strip()
-
-                # get specific address (some listings have building name instead of addy)
+                # wait on real anchors instead of sleep (better bot hiding)
                 try:
-                    addy = driver.find_element(By.CSS_SELECTOR, ".propertyAddress").text.strip()
-                except:
-                    addy = driver.find_element(By.CSS_SELECTOR, ".propertyAddressContainer").text.strip()
+                    WebDriverWait(driver, 15).until(EC.presence_of_element_located((
+                        By.CSS_SELECTOR, "#propertyName, .propertyAddressContainer"
+                    )))
+                except TimeoutException:
+                    pass
 
-                # clean up
-                full_addy = " ".join(addy.split())
-
-                try:
-                    price = driver.find_element(By.CSS_SELECTOR, ".rentInfoDetail, .priceRange").text.strip()
-                except:
-                    price = "Contact Property"
-
-                try:
-                    amenities_block = driver.find_element(By.ID, "amenitiesSection").text.lower()
-                except:
-                    amenities_block = ""
-
-                try:
-                    last_updated = driver.find_element(By.CSS_SELECTOR, "span.lastUpdated > span").text.strip()
-                except:
-                    last_updated = "Unknown"
-
-                try:
-                    available_raw = driver.find_element(By.CSS_SELECTOR, ".availabilityInfo").text.strip()
-                except:
-                    available_raw = ""
-
-                avail_dt, is_now = parse_availability(available_raw, datetime.now())
-
-                record = {
-                    "Address": full_addy,
-                    "Price": price,
-                    "Available_Raw": available_raw,  # date is not always consistent
-                    "Available_Date": avail_dt,      # better to add all and check manually
-                    "Available_Now": is_now,
-                    "Raw_Amenities": amenities_block,
-                    "Last_Updated": last_updated,
-                    "URL": url
-                }
-
-                listings.append(record)
-
-                # don't get caught as a bot hehe
+                listings.append(extract_listing(driver, url, today))
                 time.sleep(random.uniform(1.5, 3.5))
 
             except Exception as e:
@@ -243,8 +284,8 @@ def get_closest_stop(stops_df, apartments_df):
     stops_df[['lat', 'lng']] = stops_df['Address'].apply(get_cords).tolist()
 
     # drop empty lat lng rows and reset the dataframe index
-    apartments_df = apartments_df.dropna().reset_index(drop=True)
-    stops_df = stops_df.dropna().reset_index(drop=True)
+    apartments_df = apartments_df.dropna(subset=['lat', 'lng']).reset_index(drop=True)
+    stops_df = stops_df.dropna(subset=['lat', 'lng']).reset_index(drop=True)
 
     # get index of all stop destinations
     coords_tstop = stops_df[['lat', 'lng']].values
@@ -259,7 +300,7 @@ def get_closest_stop(stops_df, apartments_df):
         try:
             res = requests.get(url, params={"overview": "false"}).json()
             if res.get("routes"):
-                return res["routes"][0]["distance"] * 0.000621371 # meters to miles
+                return res["routes"][0]["distance"] * 0.000621371  # meters to miles
         except Exception:
             pass
         return float('inf')
@@ -287,18 +328,58 @@ def get_closest_stop(stops_df, apartments_df):
             stop_color = None
 
         closest_matches.append({
-            'apartment_address': row1['Address'],
+            'URL': row1['URL'],
             'closest_tstop_address': best_stops_address,
             'tstop_line': stop_color,
             'driving_distance_miles': round(min_drive_dist, 2)
         })
 
-    result_df = pd.DataFrame(closest_matches)
-    cleaned_df = result_df.sort_values(by='driving_distance_miles', ascending=True)
+    COLUMNS = ["URL", "closest_tstop_address",
+               "tstop_line", "driving_distance_miles"]
+    result_df = pd.DataFrame(closest_matches, columns=COLUMNS)
 
+    if result_df.empty:
+        print("No apartment/stop matches found.")
+        return None
+
+    cleaned_df = result_df.sort_values(by='driving_distance_miles', ascending=True)
     return cleaned_df
 
 
+def rank_matches(full_df):
+    df = full_df.copy()
+
+    # convert price from string to value
+    price_num = (df['Price'].astype(str)
+                 .str.replace(r'[^0-9.]', '', regex=True)
+                 .replace('', None)
+                 .astype(float))
+    dist_num = pd.to_numeric(df['driving_distance_miles'], errors='coerce')
+
+    # score out of 5
+    def normalize(series):
+        s = series.astype(float)
+        valid = s.dropna()
+
+        if valid.empty:
+            return pd.Series(0.0, index=s.index)
+        lo, hi = valid.min(), valid.max()
+
+        if hi == lo:
+            scored = pd.Series(5.0, index=s.index)
+        else:
+            scored = (hi - s) / (hi - lo) * 5.0
+        return scored.fillna(0.0)  # if price or distance is missing give it bad score
+
+    dist_score = normalize(dist_num)
+    price_score = normalize(price_num)
+
+    def calculate_rank(d_score, p_score):
+        return round(0.65 * d_score + 0.35 * p_score, 2)
+
+    df['ranking'] = [calculate_rank(d, p) for d, p in zip(dist_score, price_score)]
+
+    return df.sort_values(by='ranking', ascending=False).reset_index(drop=True)
 
 
 if __name__ == "__main__":
@@ -324,16 +405,21 @@ if __name__ == "__main__":
 
     if links:
         # FOR TESTING
-        # links_temp = links[0:4]
-        apartments_df = scrape_indiv_listing(links)
+        links_temp = links[0:10]
+        apartments_df = scrape_indiv_listing(links_temp)
         # print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
     api_key = sys.argv[1]
-    stops_df = get_transit(api_key)
 
     if apartments_df.empty:
         all_info = apartments_df.copy()
     else:
+        stops_df = get_transit(api_key)
+
         stop_info_df = get_closest_stop(stops_df, apartments_df)
-        all_info = apartments_df.merge(stop_info_df, on="Address", how="left")
-        print(f"Final Apartment Dataframe:\n{all_info}")
+        all_info = apartments_df.merge(stop_info_df, on="URL", how="left")
+
+        # rank choices
+        ranked_info = rank_matches(all_info)
+
+        print(f"Final Apartment Dataframe:\n{ranked_info}")
