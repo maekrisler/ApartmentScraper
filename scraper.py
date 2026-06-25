@@ -3,11 +3,15 @@ import pandas as pd
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 import time
+from datetime import datetime
+from dateutil import parser as dateparser
 import requests
 import sys
 from geopy.geocoders import Nominatim
 from scipy.spatial import KDTree
 from geopy.extra.rate_limiter import RateLimiter
+
+pd.set_option('display.max_columns', None)
 
 
 class ApartmentScraper:
@@ -20,9 +24,13 @@ class ApartmentScraper:
         self.laundry = None
         self.pets = None
         self.parking = None
+        self.move_in_date = None
 
         # apartment.com specific strings
         self.bed_map = {0: "studios", 1: "1-bedrooms", 2: "2-bedrooms", 3: "3-bedrooms"}
+
+        # desired apartment types
+        self.allowed_types = ["houses", "condos", "townhomes"]
 
     def with_min_bedrooms(self, beds:int):
         if beds in self.bed_map:
@@ -33,49 +41,81 @@ class ApartmentScraper:
         self.max_price = f"under-{price}"
         return self
 
+    def with_move_in(self, move_in_date:datetime):
+        self.move_in_date = move_in_date
+        return self
+
     def build_url(self) -> str:
-        components = [self.location]
+        urls = []
+        for housing_type in self.allowed_types:
+            components = [housing_type, self.location]
+            modifiers = []
 
-        modifiers = []
-        if self.min_beds:
-            modifiers.append(f"min-{self.min_beds}")
-        if self.max_price:
-            modifiers.append(self.max_price)
-        if modifiers:
-            components.append("-".join(modifiers))
+            if self.min_beds:
+                modifiers.append(f"min-{self.min_beds}")
+            if self.max_price:
+                modifiers.append(self.max_price)
+            if modifiers:
+                components.append("-".join(modifiers))
 
-        final_path = "/".join(components) + "/"
-        return f"{self.BASE_URL}/{final_path}"
+            final_path = "/".join(components) + "/"
+            url = f"{self.BASE_URL}/{final_path}"
 
-def scrape_apartmentsdotcom(search_url):
+            urls.append(url)
+        return urls
+
+
+def scrape_apartmentsdotcom(search_urls):
     # make that baby undetected
     driver = Driver(uc=True, headless2=True)
 
     all_links = []
     try:
-        print("Starting the scrape ...")
-        driver.get(search_url)
+        for search_url in search_urls:
+            print(f"Starting the scrape for {search_url} ...")
+            driver.get(search_url)
 
-        time.sleep(5)
+            time.sleep(5)
 
-        for _ in range(2):
-            driver.execute_script("window.scrollBy(0, 1200);")
-            time.sleep(1)
+            for _ in range(2):
+                driver.execute_script("window.scrollBy(0, 1200);")
+                time.sleep(1)
 
-        # might need to change based on site
-        listings = driver.find_elements(By.CSS_SELECTOR, "a.property-link")
+            # might need to change based on site
+            listings = driver.find_elements(By.CSS_SELECTOR, "a.property-link")
 
-        for link in listings:
-            url = link.get_attribute("href")
-            # dedupe
-            if url and url not in all_links:
-                all_links.append(url)
+            for link in listings:
+                url = link.get_attribute("href")
+                # dedupe
+                if url and url not in all_links:
+                    all_links.append(url)
 
         print(f"Successfully collected {len(all_links)} unique listing URLs.")
         return all_links
 
     finally:
         driver.quit()
+
+
+def parse_availability(raw_txt, today):
+    if not raw_txt:
+        return None, False
+
+    lil_t = raw_txt.lower()
+    if any(word in lil_t for word in ("now", "immediate", "today")):
+        return today, True
+    if "soon" in lil_t:
+        return None, False
+
+    try:
+        dt = dateparser.parse(raw_txt, fuzzy=True,
+                              default=datetime(today.year, today.month, 1))
+
+        if dt < today and (today - dt).days > 30:
+            dt = dt.replace(year=dt.year + 1)
+            return dt, False
+    except (ValueError, OverflowError):
+        return None, False
 
 
 def scrape_indiv_listing(url_list):
@@ -97,13 +137,13 @@ def scrape_indiv_listing(url_list):
                 try:
                     addy = driver.find_element(By.CSS_SELECTOR, ".propertyAddress").text.strip()
                 except:
-                    addy = driver.find_element(By.CSS_SELECTOR, ".propertyAddressContainer").text.strip
+                    addy = driver.find_element(By.CSS_SELECTOR, ".propertyAddressContainer").text.strip()
 
                 # clean up
                 full_addy = " ".join(addy.split())
 
                 try:
-                    price = driver.find_element(By.CSS_SELECTOR, ".rentInfoLabel, .priceRange").text.strip()
+                    price = driver.find_element(By.CSS_SELECTOR, ".rentInfoDetail, .priceRange").text.strip()
                 except:
                     price = "Contact Property"
 
@@ -112,10 +152,26 @@ def scrape_indiv_listing(url_list):
                 except:
                     amenities_block = ""
 
+                try:
+                    last_updated = driver.find_element(By.CSS_SELECTOR, "span.lastUpdated > span").text.strip()
+                except:
+                    last_updated = "Unknown"
+
+                try:
+                    available_raw = driver.find_element(By.CSS_SELECTOR, ".availabilityInfo").text.strip()
+                except:
+                    available_raw = ""
+
+                avail_dt, is_now = parse_availability(available_raw, datetime.now())
+
                 record = {
                     "Address": full_addy,
                     "Price": price,
+                    "Available_Raw": available_raw,  # date is not always consistent
+                    "Available_Date": avail_dt,      # better to add all and check manually
+                    "Available_Now": is_now,
                     "Raw_Amenities": amenities_block,
+                    "Last_Updated": last_updated,
                     "URL": url
                 }
 
@@ -125,12 +181,25 @@ def scrape_indiv_listing(url_list):
                 time.sleep(random.uniform(1.5, 3.5))
 
             except Exception as e:
-                print(f"Skipping broken detail page: {url}")
+                print(f"Skipping broken detail page: {url}\n Error: {e}")
                 continue
     finally:
         driver.quit()
 
-    return pd.DataFrame(listings)
+    # define columns so if one is completely empty mask doesn't break
+    COLUMNS = ["Address", "Price", "Available_Raw", "Available_Date",
+               "Available_Now", "Raw_Amenities", "Last_Updated", "URL"]
+
+    df = pd.DataFrame(listings, columns=COLUMNS)
+
+    # coerce converts None -> NaT for datetime comparison
+    df["Available_Date"] = pd.to_datetime(df["Available_Date"], errors="coerce")
+    df["Available_Now"] = df["Available_Now"].fillna(False).astype(bool)
+
+    mask = df["Available_Now"] | (df["Available_Date"] <= pd.Timestamp(move_in))
+    df_cleaned = df[mask].drop_duplicates(subset=["Address"], keep="first")
+
+    return df_cleaned
 
 
 def get_transit(api_key):
@@ -158,7 +227,6 @@ def get_transit(api_key):
                 })
 
     stops_df = pd.DataFrame(stops_list).dropna(subset=['Address']).drop_duplicates().reset_index(drop=True)
-    print(stops_df.head())
     return stops_df
 
 
@@ -226,17 +294,18 @@ def get_closest_stop(stops_df, apartments_df):
         })
 
     result_df = pd.DataFrame(closest_matches)
-    result_df.sort_values(by='driving_distance_miles', inplace=True, ascending=False)
-    print(result_df.head())
-    return result_df
+    cleaned_df = result_df.sort_values(by='driving_distance_miles', ascending=True)
+
+    return cleaned_df
 
 
 
 
 if __name__ == "__main__":
-    target_city = "cambridge-ma"
+    target_city = "allston-ma"
     max_budget = 3000
     required_beds = 2
+    move_in = datetime(2026, 8, 1)
 
     if len(sys.argv) < 2:
         print("Usage: python scraper.py <api_key>")
@@ -245,7 +314,8 @@ if __name__ == "__main__":
     # Dynamically build the search query
     query = (ApartmentScraper(location=target_city)
              .with_min_bedrooms(required_beds)
-             .with_max_price(max_budget))
+             .with_max_price(max_budget)
+             .with_move_in(move_in))
 
     generated_url = query.build_url()
 
@@ -254,11 +324,16 @@ if __name__ == "__main__":
 
     if links:
         # FOR TESTING
-        links_temp = links[0:9]
-        apartments_df = scrape_indiv_listing(links_temp)
+        # links_temp = links[0:4]
+        apartments_df = scrape_indiv_listing(links)
+        # print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
     api_key = sys.argv[1]
     stops_df = get_transit(api_key)
 
-    full_df = get_closest_stop(stops_df, apartments_df)
-    print(full_df)
+    if apartments_df.empty:
+        all_info = apartments_df.copy()
+    else:
+        stop_info_df = get_closest_stop(stops_df, apartments_df)
+        all_info = apartments_df.merge(stop_info_df, on="Address", how="left")
+        print(f"Final Apartment Dataframe:\n{all_info}")
