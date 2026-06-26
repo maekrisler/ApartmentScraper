@@ -16,6 +16,9 @@ from geopy.extra.rate_limiter import RateLimiter
 import re
 import os
 from dotenv import load_dotenv
+import smtplib
+from email.message import EmailMessage
+import build_email as build
 
 pd.set_option('display.max_columns', None)
 load_dotenv()
@@ -327,18 +330,21 @@ def get_closest_stop(stops_df, apartments_df):
 
         if best_stops_address:
             stop_color = stops_df.loc[stops_df['Address'] == best_stops_address, 'Line'].values[0]
+            stop_name = stops_df.loc[stops_df['Address'] == best_stops_address, 'Stop Name'].values[0]
         else:
             stop_color = None
+            stop_name = None
 
         closest_matches.append({
             'URL': row1['URL'],
             'closest_tstop_address': best_stops_address,
             'tstop_line': stop_color,
+            'tstop_name': stop_name,
             'driving_distance_miles': round(min_drive_dist, 2)
         })
 
     COLUMNS = ["URL", "closest_tstop_address",
-               "tstop_line", "driving_distance_miles"]
+               "tstop_line", "tstop_name", "driving_distance_miles"]
     result_df = pd.DataFrame(closest_matches, columns=COLUMNS)
 
     if result_df.empty:
@@ -399,8 +405,8 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
 
     if links:
         # FOR TESTING
-        links_temp = links[0:10]
-        apartments_df = scrape_indiv_listing(links_temp)
+        # links_temp = links[0:10]
+        apartments_df = scrape_indiv_listing(links)
         # print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
     api_key = os.getenv("TRANSIT_API_KEY")
@@ -418,15 +424,52 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
 
         # rank choices
         ranked_info = rank_matches(all_info)
-
         print(f"Final Apartment Dataframe:\n{ranked_info}")
+
+    return ranked_info
+
+
+def send_summary(df, subtitle=""):
+    html = build.build_html(df, subtitle=subtitle)
+    text = build.build_plaintext(df)
+
+    msg = EmailMessage()
+    msg["Subject"] = "Apartment Hunt Digest"
+    msg["From"] = os.getenv("SENDER_EMAIL")
+    msg["To"] = os.getenv("RECIPIENT_EMAIL")
+    msg.set_content(text)
+    msg.add_alternative(html, subtype="html")
+
+    try:
+        with smtplib.SMTP(os.getenv("SMTP_SERVER"), int(os.getenv("SMTP_PORT"))) as server:
+            server.starttls()
+            server.login(os.getenv("SENDER_EMAIL"), os.getenv("SENDER_PASSWORD"))
+            server.send_message(msg)
+        print("Email sent successfully!")
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"Auth failed (check the Gmail App Password): {e}")
+    except Exception as e:
+        print(f"Failed to send email. Error: {e}")
 
 
 if __name__ == "__main__":
-    target_cities = ["south-end-boston-ma", "back-bay-boston-ma", "allston-ma", "cambridge-ma", "somerville-ma"]
+    target_cities = ["allston-ma", "cambridge-ma", "somerville-ma"]
+
+    # for testing
+    # target_cities = ["allston-ma"]
     max_budget = 3000
     required_beds = 2
     move_in = datetime(2026, 8, 1)
 
+    total_listings = []
     for location in target_cities:
-        aggregate_nbr(loc=location, budget=max_budget, beds=required_beds, move_in_date=move_in)
+        part = aggregate_nbr(loc=location, budget=max_budget, beds=required_beds, move_in_date=move_in)
+        if part is None or part.empty:
+            print(f"No listings for {location}, skipping.")
+            continue
+        part["neighborhood"] = location
+        total_listings.append(part)
+
+    email_df = pd.concat(total_listings, ignore_index=True)
+    send_summary(email_df, subtitle="Budget $3,000 · 2 bed · move-in Aug 1, 2026")
+
