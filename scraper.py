@@ -12,7 +12,6 @@ import time
 from datetime import datetime
 from dateutil import parser as dateparser
 import requests
-import sys
 from geopy.geocoders import Nominatim
 from scipy.spatial import KDTree
 from geopy.extra.rate_limiter import RateLimiter
@@ -459,7 +458,10 @@ def get_closest_stop(stops_df, apartments_df):
 
     # strip units from listings for more accurate encoding
     UNIT_RE = re.compile(
-        r',?\s*(?:unit|apt\.?|apartment|suite|ste\.?|fl\.?|floor|rm\.?|room|#)\s*[\w-]+',
+        r',?\s*'
+        r'(?:unit|apt\.?|apartment|suite|ste\.?|fl\.?|floor|rm\.?|room|no\.?|#)'
+        r'\s*#?\s*'  # allow an optional "#" between keyword and value
+        r'[\w-]+',
         flags=re.IGNORECASE,
     )
     def strip_unit(addr):
@@ -553,6 +555,38 @@ def get_closest_stop(stops_df, apartments_df):
 def rank_matches(full_df):
     df = full_df.copy()
 
+    AMENITY_WEIGHTS = {
+        "Laundry": 2,
+        "Parking": 3,
+        "Pets":    1,
+    }
+
+    def _truthy(series, col_type):
+        # convert mixed type cols to bool for scoring
+        if col_type == "Laundry":
+            return (series.astype(str).str.strip().str.lower()
+                    .isin({"In-unit"}))
+        if col_type == "Parking":
+            return (series.astype(str).str.strip().str.lower()
+                    .isin({"Mentioned"}))
+        if col_type == "Pets":
+            return (series.astype(str).str.strip().str.lower()
+                    .isin({"Pets allowed"}))
+
+    def score_amenities(df, amenity_weights):
+        max_possible = sum(amenity_weights.values())
+        if max_possible == 0:
+            return pd.Series(0.0, index=df.index)
+
+        earned = pd.Series(0.0, index=df.index)
+        for col, weight in amenity_weights.items():
+            if col not in df.columns:  # amenity not scraped for this run — skip
+                continue
+            earned += _truthy(df[col], col) * weight
+
+        # scale earned/max_possible (0–1) up to the same 0–5 range as the others
+        return (earned / max_possible) * 5.0
+
     # convert price from string to value
     price_num = (df['Price'].astype(str)
                  .str.replace(r'[^0-9.]', '', regex=True)
@@ -577,11 +611,12 @@ def rank_matches(full_df):
 
     dist_score = normalize(dist_num)
     price_score = normalize(price_num)
+    amenity_score = score_amenities(full_df, AMENITY_WEIGHTS)
 
-    def calculate_rank(d_score, p_score):
-        return round(0.65 * d_score + 0.35 * p_score, 2)
+    def calculate_rank(d_score, p_score, a_score):
+        return round(0.50 * d_score + 0.30 * p_score + 0.20 * a_score, 2)
 
-    df['ranking'] = [calculate_rank(d, p) for d, p in zip(dist_score, price_score)]
+    df['ranking'] = [calculate_rank(d, p, a) for d, p, a in zip(dist_score, price_score, amenity_score)]
 
     return df.sort_values(by='ranking', ascending=False).reset_index(drop=True)
 
@@ -601,7 +636,7 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
     if links:
         # FOR TESTING
         links_temp = links[0:15]
-        apartments_df = scrape_indiv_listing(links_temp)
+        apartments_df = scrape_indiv_listing(links)
         # print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
     api_key = os.getenv("TRANSIT_API_KEY")
@@ -625,21 +660,47 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
     return ranked_info
 
 
-def build_map(df, location):
+def build_map(df, location, width_px=600, height_px=300, dpi=100, pad_frac=0.25):
     gdf = gpd.GeoDataFrame(
         df, geometry=gpd.points_from_xy(df['lng'], df['lat']), crs="EPSG:4326"
     ).to_crs(epsg=3857)
 
-    ax = gdf.plot(figsize=(8, 6), color="red", markersize=40)
+    fig_w, fig_h = width_px / dpi, height_px / dpi
+    fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1])
+
+    xmin, ymin, xmax, ymax = gdf.total_bounds
+    cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+    xspan, yspan = xmax - xmin, ymax - ymin
+
+    DEFAULT_SPAN = 1500  # meters
+    xspan = xspan or DEFAULT_SPAN
+    yspan = yspan or DEFAULT_SPAN
+    xspan *= (1 + pad_frac)
+    yspan *= (1 + pad_frac)
+
+    # expand the smaller dimension so the window aspect == figure aspect
+    target = fig_w / fig_h
+    if xspan / yspan < target:
+        xspan = yspan * target
+    else:
+        yspan = xspan / target
+
+    ax.set_xlim(cx - xspan / 2, cx + xspan / 2)
+    ax.set_ylim(cy - yspan / 2, cy + yspan / 2)
+    ax.set_aspect('equal')
+
+    gdf.plot(ax=ax, color="blue", markersize=40)
     ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
     ax.set_axis_off()
+
     title = f"{location}_map.png"
-    plt.savefig(title, dpi=150, bbox_inches="tight")
-    plt.close()
+    fig.savefig(title, dpi=dpi)
+    plt.close(fig)
 
 
 def send_summary(df, subtitle=""):
-    html = build.build_html(df, subtitle=subtitle)
+    html, map_attachments = build.build_html(df, subtitle=subtitle)
     text = build.build_plaintext(df)
 
     msg = EmailMessage()
@@ -648,6 +709,15 @@ def send_summary(df, subtitle=""):
     msg["To"] = os.getenv("RECIPIENT_EMAIL")
     msg.set_content(text)
     msg.add_alternative(html, subtype="html")
+
+    html_part = msg.get_payload()[1]
+    for cid, path in map_attachments:
+        with open(path, "rb") as f:
+            html_part.add_related(
+                f.read(),
+                "image", "png",
+                cid=f"<{cid}>",
+            )
 
     try:
         with smtplib.SMTP(os.getenv("SMTP_SERVER"), int(os.getenv("SMTP_PORT"))) as server:
@@ -662,11 +732,12 @@ def send_summary(df, subtitle=""):
 
 
 if __name__ == "__main__":
-    # "south-end-boston-ma", "beacon-hill-boston-ma", "back-bay-boston-ma"
-    # target_cities = ["allston-ma", "cambridge-ma", "somerville-ma"]
+    # "south-end-boston-ma", "beacon-hill-boston-ma", "back-bay-boston-ma", "allston-ma",
+    # target_cities = ["mid-cambridge-cambridge-ma", "the-port-cambridge-ma",
+    #                  "kendall-square-cambridge-ma", "ward-two-cambridge-ma", "avon-hill-cambridge-ma"]
 
     # for testing
-    target_cities = ["somerville-ma"]
+    target_cities = ["south-end-boston-ma"]
     max_budget = 3000
     required_beds = 2
     move_in = datetime(2026, 8, 1)

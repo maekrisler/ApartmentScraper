@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apartment-hunt-digest"
+version = "0.1.0"
+description = "Scrapes apartments.com, enriches listings with MBTA transit distance and move-in costs, ranks them, and emails a formatted digest with per-neighborhood maps."
+readme = "README.md"
+requires-python = ">=3.9"
+keywords = ["apartments", "scraper", "selenium", "mbta", "geocoding", "real-estate"]
+
+# Runtime dependencies inferred from the imports in scraper.py and build_email.py.
+dependencies = [
+    "seleniumbase>=4.20",      # undetected Chrome scraping (also pulls in selenium)
+    "selenium>=4.10",          # explicit: By, WebDriverWait, expected_conditions
+    "pandas>=2.0",             # dataframes throughout the pipeline
+    "geopandas>=0.13",         # building the per-neighborhood maps
+    "contextily>=1.3",         # basemap tiles for the maps
+    "matplotlib>=3.7",         # rendering/saving the map PNGs
+    "geopy>=2.3",              # Nominatim geocoding + RateLimiter
+    "scipy>=1.10",             # KDTree nearest-stop lookup
+    "requests>=2.31",          # MBTA API + OSRM routing calls
+    "python-dateutil>=2.8",    # fuzzy availability-date parsing
+    "python-dotenv>=1.0",      # loading the .env file
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "black>=24.0",
+]
+
+[project.scripts]
+# Run the pipeline with `apartment-hunt` after `pip install -e .`,
+# equivalent to `python scraper.py`.
+apartment-hunt = "scraper:__main__"
+
+[tool.setuptools]
+# Single-module project: ship the two top-level modules rather than a package.
+py-modules = ["scraper", "build_email"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]   # pycodestyle, pyflakes, warnings, import sorting

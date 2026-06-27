@@ -29,6 +29,7 @@ SAGE = IRON_GREY           # counts / footer text on the pink page (slate)
 NEIGHBORHOOD_NAMES = {
     "south-end-boston-ma": "South End, Boston",
     "back-bay-boston-ma": "Back Bay, Boston",
+    "beacon-hill-boston-ma": "Beacon Hill, Boston",
     "allston-ma": "Allston",
     "cambridge-ma": "Cambridge",
     "somerville-ma": "Somerville",
@@ -55,7 +56,6 @@ def _apartment_card(apt):
     addr = _safe(apt.get("Address"), "Unknown address")
     price = _safe(apt.get("Price"))
     avail = _safe(apt.get("Available_Raw"))
-    tstop = _safe(apt.get("closest_tstop_address"))
     tstopname = _safe(apt.get('tstop_name'))
     score = apt.get("ranking")
     miles = apt.get("driving_distance_miles")
@@ -106,7 +106,7 @@ def _apartment_card(apt):
                   <div style="color:{INK};opacity:0.75;font-size:13px;padding-top:7px;line-height:1.4;">
                     <span style="display:inline-block;height:9px;width:9px;border-radius:50%;
                                  background:{dot};"></span>
-                    {line} Line &middot; {tstop} &middot; {miles_html}
+                    {line} Line &middot; {miles_html}
                   </div>
                 </td>
                 <td style="vertical-align:top;text-align:right;white-space:nowrap;padding-left:14px;">
@@ -121,11 +121,13 @@ def _apartment_card(apt):
         </table>"""
 
 
-def build_html(df, neighborhood_col="neighborhood", order=None, subtitle=""):
+def build_html(df, neighborhood_col="neighborhood", order=None, subtitle="", map_dir="."):
     if order is None:
         order = list(pd.unique(df[neighborhood_col].dropna()))
 
     sections = []
+    map_attachments = []
+
     for key in order:
         group = df[df[neighborhood_col] == key]
         if group.empty:
@@ -133,6 +135,19 @@ def build_html(df, neighborhood_col="neighborhood", order=None, subtitle=""):
         group = group.sort_values("ranking", ascending=False)
         title = NEIGHBORHOOD_NAMES.get(key, str(key))
         cards = "".join(_apartment_card(apt) for _, apt in group.iterrows())
+
+        map_path = os.path.join(map_dir, f"{key}_map.png")
+        map_row = ""
+        if os.path.exists(map_path):
+            cid = f"map-{key}"
+            map_attachments.append((cid, map_path))
+            map_row = f"""
+          <tr><td style="padding:4px 0 18px 0;">
+            <img src="cid:{cid}" width="600" alt="Map of {title}"
+                 style="display:block;width:100%;max-width:600px;height:auto;
+                        border:1px solid {ACCENT};border-radius:6px;">
+          </td></tr>"""
+
         sections.append(f"""
           <tr><td style="padding:26px 0 10px 0;font-family:Arial,Helvetica,sans-serif;">
             <div style="font-size:17px;font-weight:bold;color:{ON_DARK};
@@ -142,12 +157,12 @@ def build_html(df, neighborhood_col="neighborhood", order=None, subtitle=""):
                 &nbsp;{len(group)} listing{'s' if len(group) != 1 else ''}</span>
             </div>
           </td></tr>
-          <tr><td>{cards}</td></tr>""")
+          <tr><td>{cards}</td></tr>{map_row}""")
 
     sub = (f'<div style="color:{MUTED_LIGHT};font-size:13px;padding-top:6px;">{subtitle}</div>'
            if subtitle else "")
 
-    return f"""\
+    html =  f"""\
 <!DOCTYPE html>
 <html><body style="margin:0;padding:0;background:{PAGE_BG};">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0"
@@ -168,6 +183,9 @@ def build_html(df, neighborhood_col="neighborhood", order=None, subtitle=""):
     </td></tr>
   </table>
 </body></html>"""
+
+    return html, map_attachments
+
 
 def build_plaintext(df, neighborhood_col="neighborhood", order=None):
     if order is None:
