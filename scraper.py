@@ -1,5 +1,8 @@
 import random
+import geopandas as gpd
+import contextily as ctx
 import pandas as pd
+import matplotlib.pyplot as plt
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -30,6 +33,7 @@ class ApartmentScraper:
     def __init__(self, location: str):
         self.location = location.lower().replace(", ", "-").replace(" ", "-")
         self.min_beds = None
+        self.min_baths = None
         self.max_price = None
         self.laundry = None
         self.pets = None
@@ -46,6 +50,8 @@ class ApartmentScraper:
         if beds in self.bed_map:
             self.min_beds = self.bed_map[beds]
         return self
+
+    # todo: add with_min_bathroom
 
     def with_max_price(self, price: int):
         self.max_price = f"under-{price}"
@@ -86,6 +92,12 @@ def scrape_apartmentsdotcom(search_urls):
             driver.get(search_url)
 
             time.sleep(5)
+
+            # stop the search if no results are found
+            expanded = driver.find_elements(By.CSS_SELECTOR, "div.no-results h3")
+            if expanded:
+                print(f"  Search area was auto-expanded for {search_url} -- skipping.")
+                continue
 
             for _ in range(2):
                 driver.execute_script("window.scrollBy(0, 1200);")
@@ -176,6 +188,153 @@ def looks_blocked(driver):
                 "unusual activity", "verify you are"))
 
 
+# pull description to get amenities
+def pull_description(driver):
+    full_desc = []
+
+    for selector in ["#descriptionSection", "section.descriptionSection"]:
+        try:
+            element = driver.find_element(By.CSS_SELECTOR, selector)
+            txt = element.get_attribute("textContent") or ""
+            if txt.strip():
+                full_desc.append(txt)
+        except NoSuchElementException:
+            continue
+
+    # pull additional details from 'Home Details' section
+    try:
+        section = driver.find_element(
+            By.XPATH,
+            "//section[contains(@class,'feature-section')]"
+            "[.//h3[normalize-space()='Home Details']]"
+        )
+
+        lines = ["Home Details:"]
+        # home details are stored as stacked divs, must extract every row separately
+        for row in section.find_elements(By.CSS_SELECTOR, ".detail-row"):
+            try:
+                title = (row.find_element(By.CSS_SELECTOR, ".detail-title")
+                         .get_attribute("textContent") or "").strip()
+            except NoSuchElementException:
+                title = ""
+
+            items = [
+                (s.get_attribute("textContent") or "").strip()
+                for s in row.find_elements(By.CSS_SELECTOR, ".detail-items span")
+            ]
+            items = [i for i in items if i]
+
+            if title and items:
+                lines.append(f"{title}: {', '.join(items)}")
+            elif items:
+                lines.append(", ".join(items))
+
+        if len(lines) > 1:
+            full_desc.append("\n".join(lines))
+    except NoSuchElementException:
+        pass
+
+    return "\n\n".join(full_desc)
+
+
+def get_movein_cost(description_txt):
+    FEE_PATTERN = re.compile(
+        r'([A-Za-z][A-Za-z &/.\-]*?)\s*:\s*\$\s?([\d,]+(?:\.\d{1,2})?)'
+    )
+
+    txt_block = description_txt
+    mc = re.search(r'move[\s-]?in cost', description_txt, re.IGNORECASE)
+
+    if mc:
+        block = txt_block[mc.start():]
+        # ignore legal disclaimers
+        disclaimer = re.search(r'disclaimer\s*:', block, re.IGNORECASE)
+
+        if disclaimer:
+            block = block[:disclaimer.start()]
+    if not mc:
+        return {}
+
+    fees = {}
+    for label, amount in FEE_PATTERN.findall(block):
+        fees[label.strip()] = float(amount.replace(",", ""))
+    return fees
+
+
+def cost_summary(fees):
+    RECURRING_KEYWORDS = ("utilit", "water", "sewer", "trash", "garbage", "gas",
+                          "electric", "heat", "parking", "cable", "internet", "pet rent",
+                          "amenity fee", "common area", "cam", "lock")
+
+    first_month = last_month = deposit = 0.0
+    one_time_fees, recurring_fees = {}, {}
+
+    for label, value in fees.items():
+        sml_l = label.lower()
+        if "first month" in sml_l:
+            first_month = value
+        elif "last month" in sml_l:
+            last_month = value
+        elif "deposit" in sml_l:
+            deposit = value
+        elif any(k in sml_l for k in RECURRING_KEYWORDS):
+            recurring_fees[label] = value
+        else:
+            one_time_fees[label] = value
+
+    total = first_month + last_month + deposit + sum(one_time_fees.values())
+
+    return {
+        "First_Month_Rent": first_month or None,
+        "Last_Month_Rent": last_month or None,
+        "Security_Deposit": deposit or None,
+        "Extra_Move_In_Fees": one_time_fees or None,
+        "Recurring_Fees": recurring_fees or None,
+        "Total_Move_In_Cost": round(total, 2) if total else None,
+    }
+
+
+def scan_amenities(desc_text):
+    low = desc_text.lower()
+    def has_any(terms): return any(t in low for t in terms)
+
+    if has_any(["in unit laundry", "in-unit laundry", "in unit washer",
+                "washer/dryer", "washer & dryer", "laundry in unit"]):
+        laundry = "In-unit"
+    elif has_any(["laundry in building", "on-site laundry", "shared laundry",
+                  "coin laundry", "laundry facilities"]):
+        laundry = "On-site/shared"
+    elif has_any(["laundry hookup", "w/d hookup", "washer/dryer hookup"]):
+        laundry = "Hookups only"
+    elif re.search(r'\b(laundry|washer)\b', low):
+        laundry = "Mentioned"
+    else:
+        laundry = None
+
+    if has_any(["no parking", "street parking only"]):
+        parking = "No / street only"
+    elif has_any(["garage", "off-street parking", "off street parking",
+                  "covered parking", "assigned parking", "deeded parking",
+                  "parking included", "parking available", "driveway"]):
+        parking = "Available"
+    elif "parking" in low:
+        parking = "Mentioned"
+    else:
+        parking = None
+
+    if has_any(["no pets", "pets not allowed", "no dogs", "no cats", "pet-free"]):
+        pets = "No pets"
+    elif has_any(["pet friendly", "pet-friendly", "pets allowed", "pets ok",
+                  "pets welcome", "cats ok", "dogs ok", "cats and dogs"]):
+        pets = "Pets allowed"
+    elif re.search(r'\b(pet|cat|dog)s?\b', low):
+        pets = "See listing"
+    else:
+        pets = None
+
+    return {"Laundry": laundry, "Parking": parking, "Pets": pets}
+
+
 # extract the apartment info
 def extract_listing(driver, url, today):
     # headlines could be a building name or price, check for $ to handle differences properly
@@ -189,6 +348,11 @@ def extract_listing(driver, url, today):
     avail_raw = grid.get("available") or first_text(driver, [".availabilityInfo"]) or ""
     avail_dt, is_now = parse_availability(avail_raw, today)
 
+    desc_text = pull_description(driver)
+    raw_costs = get_movein_cost(desc_text)
+    total_costs = cost_summary(raw_costs)
+    amenities = scan_amenities(desc_text)
+
     address = get_address(driver)
     address = re.sub(r'\bopen\b', 'Boston', address, flags=re.IGNORECASE)
 
@@ -201,6 +365,10 @@ def extract_listing(driver, url, today):
         "Available_Raw": avail_raw,
         "Available_Date": avail_dt,
         "Available_Now": is_now,
+        "Laundry": amenities["Laundry"],
+        "Parking": amenities["Parking"],
+        "Pets": amenities["Pets"],
+        **total_costs,
         "URL": url,
     }
 
@@ -234,8 +402,16 @@ def scrape_indiv_listing(url_list):
         driver.quit()
 
     # define columns so if one is completely empty mask doesn't break
-    COLUMNS = ["Address", "Price", "Available_Raw", "Available_Date",
-               "Available_Now", "Raw_Amenities", "Last_Updated", "URL"]
+    COLUMNS = [
+        "Address", "Price",
+        "Bedrooms", "Bathrooms", "SqFt",
+        "Available_Raw", "Available_Date", "Available_Now",
+        "Laundry", "Parking", "Pets",
+        "First_Month_Rent", "Last_Month_Rent", "Security_Deposit",
+        "Extra_Move_In_Fees", "Recurring_Fees", "Total_Move_In_Cost",
+        "Raw_Amenities", "Last_Updated",
+        "URL",
+    ]
 
     df = pd.DataFrame(listings, columns=COLUMNS)
 
@@ -255,7 +431,7 @@ def get_transit(api_key):
         "X-API-Key": api_key
     }
 
-    lines = ["Red", "Green", "Orange", "Silver"]
+    lines = ["Red", "Green", "Orange", "Silver", "Blue"]
     stops_list = []
 
     for line in lines:
@@ -279,12 +455,31 @@ def get_transit(api_key):
 
 def get_closest_stop(stops_df, apartments_df):
     geolocator = Nominatim(user_agent="my_distance_calculator", timeout=15)
-    chill_geolocator = RateLimiter(geolocator.geocode, min_delay_seconds=1.5)
+    chill_geolocator = RateLimiter(geolocator.geocode, min_delay_seconds=1.5, swallow_exceptions=False)
+
+    # strip units from listings for more accurate encoding
+    UNIT_RE = re.compile(
+        r',?\s*(?:unit|apt\.?|apartment|suite|ste\.?|fl\.?|floor|rm\.?|room|#)\s*[\w-]+',
+        flags=re.IGNORECASE,
+    )
+    def strip_unit(addr):
+        cleaned = UNIT_RE.sub('', addr)
+        return re.sub(r'\s{2,}', ' ', cleaned).strip()
 
     # function blueprint of how df should calculate address locations
     def get_cords(addr):
-        loc = chill_geolocator(addr)
-        return (loc.latitude, loc.longitude) if loc else (None, None)
+        if not isinstance(addr, str) or not addr.strip():
+            return (None, None)
+
+        # try full address and fallback to unit stripped on failure
+        for query in dict.fromkeys([addr, strip_unit(addr)]):
+            try:
+                loc = chill_geolocator(query)
+            except Exception as e:
+                continue
+            if loc:
+                return loc.latitude, loc.longitude
+        return None, None
 
     apartments_df[['lat', 'lng']] = apartments_df['Address'].apply(get_cords).tolist()
     stops_df[['lat', 'lng']] = stops_df['Address'].apply(get_cords).tolist()
@@ -405,8 +600,8 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
 
     if links:
         # FOR TESTING
-        # links_temp = links[0:10]
-        apartments_df = scrape_indiv_listing(links)
+        links_temp = links[0:15]
+        apartments_df = scrape_indiv_listing(links_temp)
         # print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
     api_key = os.getenv("TRANSIT_API_KEY")
@@ -416,6 +611,7 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
 
     if apartments_df.empty:
         all_info = apartments_df.copy()
+        return all_info
     else:
         stops_df = get_transit(api_key)
 
@@ -427,6 +623,19 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
         print(f"Final Apartment Dataframe:\n{ranked_info}")
 
     return ranked_info
+
+
+def build_map(df, location):
+    gdf = gpd.GeoDataFrame(
+        df, geometry=gpd.points_from_xy(df['lng'], df['lat']), crs="EPSG:4326"
+    ).to_crs(epsg=3857)
+
+    ax = gdf.plot(figsize=(8, 6), color="red", markersize=40)
+    ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
+    ax.set_axis_off()
+    title = f"{location}_map.png"
+    plt.savefig(title, dpi=150, bbox_inches="tight")
+    plt.close()
 
 
 def send_summary(df, subtitle=""):
@@ -453,10 +662,11 @@ def send_summary(df, subtitle=""):
 
 
 if __name__ == "__main__":
-    target_cities = ["allston-ma", "cambridge-ma", "somerville-ma"]
+    # "south-end-boston-ma", "beacon-hill-boston-ma", "back-bay-boston-ma"
+    # target_cities = ["allston-ma", "cambridge-ma", "somerville-ma"]
 
     # for testing
-    # target_cities = ["allston-ma"]
+    target_cities = ["somerville-ma"]
     max_budget = 3000
     required_beds = 2
     move_in = datetime(2026, 8, 1)
@@ -468,6 +678,8 @@ if __name__ == "__main__":
             print(f"No listings for {location}, skipping.")
             continue
         part["neighborhood"] = location
+
+        build_map(part, location)
         total_listings.append(part)
 
     email_df = pd.concat(total_listings, ignore_index=True)
