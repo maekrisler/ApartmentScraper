@@ -635,8 +635,8 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
 
     if links:
         # FOR TESTING
-        links_temp = links[0:15]
-        apartments_df = scrape_indiv_listing(links)
+        links_temp = links[0:5]
+        apartments_df = scrape_indiv_listing(links_temp)
         # print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
     api_key = os.getenv("TRANSIT_API_KEY")
@@ -734,10 +734,10 @@ def send_summary(df, subtitle=""):
 if __name__ == "__main__":
     # "south-end-boston-ma", "beacon-hill-boston-ma", "back-bay-boston-ma", "allston-ma",
     # target_cities = ["mid-cambridge-cambridge-ma", "the-port-cambridge-ma",
-    #                  "kendall-square-cambridge-ma", "ward-two-cambridge-ma", "avon-hill-cambridge-ma"]
+    #                  "kendall-square-cambridge-ma"]
 
     # for testing
-    target_cities = ["south-end-boston-ma"]
+    target_cities = ["spring-hill-somerville-ma"]
     max_budget = 3000
     required_beds = 2
     move_in = datetime(2026, 8, 1)

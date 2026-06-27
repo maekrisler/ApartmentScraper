@@ -33,6 +33,8 @@ NEIGHBORHOOD_NAMES = {
     "allston-ma": "Allston",
     "cambridge-ma": "Cambridge",
     "somerville-ma": "Somerville",
+    "mid-cambridge-cambridge-ma": "Mid-Cambridge, Cambridge",
+    "spring-hill-somerville-ma": "Spring Hill, Somerville"
 }
 
 # official MBTA line colors
