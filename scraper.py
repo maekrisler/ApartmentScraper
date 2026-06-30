@@ -21,9 +21,10 @@ from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
 import build_email as build
+from pathlib import Path
 
 pd.set_option('display.max_columns', None)
-load_dotenv()
+load_dotenv(Path(__file__).parent / ".env")
 
 
 class ApartmentScraper:
@@ -695,12 +696,15 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
     # Run the robust scraper
     links = scrape_apartmentsdotcom(generated_url)
 
-    if links:
+    if len(links) != 0:
         # FOR TESTING
         # links_temp = links[0:5]
         apartments_df = scrape_indiv_listing(links)
         if not apartments_df.empty:
             print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
+    else:
+        return None
+
 
     api_key = os.getenv("TRANSIT_API_KEY")
     if not api_key:
@@ -796,11 +800,14 @@ def send_summary(df, subtitle=""):
 
 if __name__ == "__main__":
     # "south-end-boston-ma", "beacon-hill-boston-ma", "back-bay-boston-ma", "allston-ma",
-    # target_cities = ["mid-cambridge-cambridge-ma", "the-port-cambridge-ma",
-    #                  "kendall-square-cambridge-ma", "inman-square-cambridge-ma"]
+    target_cities = ["mid-cambridge-cambridge-ma", "the-port-cambridge-ma",
+                     "kendall-square-cambridge-ma", "inman-square-cambridge-ma",
+                     "south-end-boston-ma", "beacon-hill-boston-ma", "back-bay-boston-ma",
+                     "spring-hill-somerville-ma", "davis-square-somerville-ma", "union-square-somerville-ma"
+                     ]
 
     # for testing
-    target_cities = ["somerville-ma"]
+    # target_cities = ["somerville-ma"]
     max_budget = 3000
     required_beds = 2
     move_in = datetime(2026, 8, 1)
