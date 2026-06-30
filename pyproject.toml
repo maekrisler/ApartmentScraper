@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Scrapes apartments.com, enriches listings with MBTA transit distance and move-in costs, ranks them, and emails a formatted digest with per-neighborhood maps."
 readme = "README.md"
 requires-python = ">=3.9"
+license = { text = "MIT" }
 keywords = ["apartments", "scraper", "selenium", "mbta", "geocoding", "real-estate"]
 
 # Runtime dependencies inferred from the imports in scraper.py and build_email.py.
