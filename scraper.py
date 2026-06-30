@@ -237,27 +237,63 @@ def pull_description(driver):
 
 
 def get_movein_cost(description_txt):
-    FEE_PATTERN = re.compile(
+    txt_block = description_txt or ""
+
+    # $3,000 deposit,
+    DEPOSIT_AMOUNT = re.compile(
+        r'\$\s?([\d,]+(?:\.\d{1,2})?)\s+([A-Za-z][A-Za-z &/.\-]*?)(?=[,.;\n]|$)',
+        re.IGNORECASE,
+    )
+
+    fees = {}
+
+    for amount, label in DEPOSIT_AMOUNT.findall(txt_block):
+        label = label.strip()
+        if not label or label.lower() in {"mo", "month", "mo.", "/ mo"}:
+            continue # skip monthly rent (pulled elsewhere)
+        fees[label] = float(amount.replace(",", ""))
+
+    # "Deposit:$3,000" / "Rent:$3,000" — label BEFORE amount
+    LABEL_FIRST = re.compile(
         r'([A-Za-z][A-Za-z &/.\-]*?)\s*:\s*\$\s?([\d,]+(?:\.\d{1,2})?)'
     )
 
-    txt_block = description_txt
-    mc = re.search(r'move[\s-]?in cost', description_txt, re.IGNORECASE)
+    for label, amount in LABEL_FIRST.findall(txt_block):
+        label = label.lower.strip()
+        if label.lower() == "rent":
+            continue
+        fees.setdefault(label, float(amount.replace(",", "")))
 
-    if mc:
-        block = txt_block[mc.start():]
-        # ignore legal disclaimers
-        disclaimer = re.search(r'disclaimer\s*:', block, re.IGNORECASE)
-
-        if disclaimer:
-            block = block[:disclaimer.start()]
-    if not mc:
-        return {}
-
-    fees = {}
-    for label, amount in FEE_PATTERN.findall(block):
-        fees[label.strip()] = float(amount.replace(",", ""))
     return fees
+
+
+def scan_billing(desc_text):
+    low = (desc_text or "").lower()
+
+    BILLS = {
+        "Heat": ["heat"], "Hot Water": ["hot water"], "Water": ["water"],
+        "Gas": ["gas"], "Electric": ["electric"], "Sewer": ["sewer"],
+        "Trash": ["trash", "garbage"], "Internet": ["internet", "wifi", "wi-fi"],
+        "Cable": ["cable"],
+    }
+
+    included = []
+    # phrases like "heat and hot water included" / "...inc"
+    for m in re.finditer(r'([a-z &/]{3,40}?)\s+(?:are |is )?inc(?:luded|\b)', low):
+        ctx = m.group(1)
+        for name, terms in BILLS.items():
+            if any(t in ctx for t in terms) and name not in included:
+                included.append(name)
+    # "Included:Water" field style
+    field = re.search(r'included?\s*:\s*([^\n]+)', low)
+    if field:
+        for name, terms in BILLS.items():
+            if any(t in field.group(1) for t in terms) and name not in included:
+                included.append(name)
+
+    no_fee = bool(re.search(r'\bno\s+(?:broker\s+)?fee\b', low))
+
+    return {"Included_Bills": included or None, "No_Added_Fees": no_fee or None}
 
 
 def cost_summary(fees):
@@ -281,15 +317,12 @@ def cost_summary(fees):
         else:
             one_time_fees[label] = value
 
-    total = first_month + last_month + deposit + sum(one_time_fees.values())
-
     return {
         "First_Month_Rent": first_month or None,
         "Last_Month_Rent": last_month or None,
         "Security_Deposit": deposit or None,
         "Extra_Move_In_Fees": one_time_fees or None,
         "Recurring_Fees": recurring_fees or None,
-        "Total_Move_In_Cost": round(total, 2) if total else None,
     }
 
 
@@ -351,6 +384,7 @@ def extract_listing(driver, url, today):
     raw_costs = get_movein_cost(desc_text)
     total_costs = cost_summary(raw_costs)
     amenities = scan_amenities(desc_text)
+    billing = scan_billing(desc_text) # search for hidden parking / extra billing fees
 
     address = get_address(driver)
     address = re.sub(r'\bopen\b', 'Boston', address, flags=re.IGNORECASE)
@@ -368,6 +402,7 @@ def extract_listing(driver, url, today):
         "Parking": amenities["Parking"],
         "Pets": amenities["Pets"],
         **total_costs,
+        **billing,
         "URL": url,
     }
 
@@ -414,10 +449,32 @@ def scrape_indiv_listing(url_list):
 
     df = pd.DataFrame(listings, columns=COLUMNS)
 
+    price_int = pd.to_numeric(
+        df["Price"].astype(str).str.replace(r"[^0-9.]", "", regex=True)
+        .replace("", pd.NA),
+        errors="coerce",
+    )
+
+    df["First_Month_Rent"] = df["First_Month_Rent"].fillna(price_int)
+
     # coerce converts None -> NaT for datetime comparison
     df["Available_Date"] = pd.to_datetime(df["Available_Date"], errors="coerce")
     df["Available_Now"] = df["Available_Now"].fillna(False).astype(bool)
 
+    # calculate total move in cost
+    scalar_cols = ["First_Month_Rent", "Last_Month_Rent", "Security_Deposit"]
+    scalar_total = df[scalar_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+
+    def sum_fees(d):
+        if not isinstance(d, dict):  # None / NaN / anything unexpected -> 0
+            return 0.0
+        return float(sum(v for v in d.values() if isinstance(v, (int, float))))
+
+    extra_total = df["Extra_Move_In_Fees"].apply(sum_fees)
+    total = scalar_total + extra_total
+    df["Total_Move_In_Cost"] = total.round(2).where(total > 0, None)
+
+    # normalize move in time stamp
     mask = df["Available_Now"] | (df["Available_Date"] <= pd.Timestamp(move_in))
     df_cleaned = df[mask].drop_duplicates(subset=["Address"], keep="first")
 
@@ -635,9 +692,9 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
 
     if links:
         # FOR TESTING
-        links_temp = links[0:5]
-        apartments_df = scrape_indiv_listing(links_temp)
-        # print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
+        # links_temp = links[0:5]
+        apartments_df = scrape_indiv_listing(links)
+        print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
     api_key = os.getenv("TRANSIT_API_KEY")
     if not api_key:
@@ -737,7 +794,7 @@ if __name__ == "__main__":
     #                  "kendall-square-cambridge-ma"]
 
     # for testing
-    target_cities = ["spring-hill-somerville-ma"]
+    target_cities = ["inman-square-cambridge-ma"]
     max_budget = 3000
     required_beds = 2
     move_in = datetime(2026, 8, 1)
