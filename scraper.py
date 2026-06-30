@@ -38,6 +38,7 @@ class ApartmentScraper:
         self.pets = None
         self.parking = None
         self.move_in_date = None
+        self.flag_new = True
 
         # apartment.com specific strings
         self.bed_map = {0: "studios", 1: "1-bedrooms", 2: "2-bedrooms", 3: "3-bedrooms"}
@@ -74,6 +75,10 @@ class ApartmentScraper:
                 components.append("-".join(modifiers))
 
             final_path = "/".join(components) + "/"
+
+            if self.flag_new:
+                final_path = final_path + "new/"
+
             url = f"{self.BASE_URL}/{final_path}"
 
             urls.append(url)
@@ -694,7 +699,8 @@ def aggregate_nbr(loc, budget, beds, move_in_date):
         # FOR TESTING
         # links_temp = links[0:5]
         apartments_df = scrape_indiv_listing(links)
-        print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
+        if not apartments_df.empty:
+            print(f"Found {len(apartments_df)} apartments\n {apartments_df}")
 
     api_key = os.getenv("TRANSIT_API_KEY")
     if not api_key:
@@ -791,10 +797,10 @@ def send_summary(df, subtitle=""):
 if __name__ == "__main__":
     # "south-end-boston-ma", "beacon-hill-boston-ma", "back-bay-boston-ma", "allston-ma",
     # target_cities = ["mid-cambridge-cambridge-ma", "the-port-cambridge-ma",
-    #                  "kendall-square-cambridge-ma"]
+    #                  "kendall-square-cambridge-ma", "inman-square-cambridge-ma"]
 
     # for testing
-    target_cities = ["inman-square-cambridge-ma"]
+    target_cities = ["somerville-ma"]
     max_budget = 3000
     required_beds = 2
     move_in = datetime(2026, 8, 1)
